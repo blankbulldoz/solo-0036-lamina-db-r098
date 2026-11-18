@@ -79,12 +79,10 @@ func (d *DB) Vacuum(requested uint64) (versions.VacuumResult, error) {
 	if requested > d.sequence || requested < d.horizon {
 		return versions.VacuumResult{}, fault("invalid", "vacuum horizon outside retained interval")
 	}
-	horizon := requested
-	for _, tx := range d.transactions {
-		if tx.Snapshot < horizon {
-			horizon = tx.Snapshot
-		}
-	}
+	// The shared retention rule protects both open transactions and in-flight
+	// executor reads. A canceled query releases only its own pin, so it can
+	// advance this floor, but an active transaction's snapshot still pins it.
+	horizon := d.retentionFloor(requested)
 	beforeKeys, beforeVersions := d.store.Count()
 	_ = beforeKeys
 	if err := d.publish(journal.Record{Kind: "vacuum", Horizon: horizon}); err != nil {

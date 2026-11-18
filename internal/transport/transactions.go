@@ -72,7 +72,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	out, err := s.db.Get(in.Transaction, in.Relation, in.Key)
+	out, err := s.db.Get(r.Context(), in.Transaction, in.Relation, in.Key)
 	if err != nil {
 		respondError(w, err)
 		return

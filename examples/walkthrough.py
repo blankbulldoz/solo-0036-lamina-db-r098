@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
-import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+import argparse, concurrent.futures, http.client, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics','query-cancel']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -38,6 +38,23 @@ class Session:
  def commit(self,tx,status=200):return self.call('POST',f'/transactions/{tx}/commit',status=status)
  def query(self,**kwargs):return self.call('POST','/query',{'relation':'spectra',**kwargs})
  def stats(self):return self.call('GET','/stats')
+ def raw_post(self,path,payload):
+  """Return (status, parsed_body) without Session's status assertion."""
+  host,port=self.url.split('//')[1].split('/')[0].split(':')
+  conn=http.client.HTTPConnection(host,int(port),timeout=12)
+  body=json.dumps(payload,ensure_ascii=False).encode()
+  conn.request('POST',self.url.replace('http://'+host+':'+port,'')+path,body=body,headers={'Content-Type':'application/json'})
+  resp=conn.getresponse();data=resp.read();conn.close()
+  try:parsed=json.loads(data)
+  except json.JSONDecodeError:parsed=data.decode()
+  return resp.status,parsed
+ def canceled_post(self,path,payload):
+  """Send a request then drop the connection before reading any response."""
+  host,port=self.url.split('//')[1].split('/')[0].split(':')
+  conn=http.client.HTTPConnection(host,int(port),timeout=12)
+  body=json.dumps(payload,ensure_ascii=False).encode()
+  conn.request('POST',self.url.replace('http://'+host+':'+port,'')+path,body=body,headers={'Content-Type':'application/json'})
+  conn.sock.shutdown(socket.SHUT_RDWR);conn.close()
 def require(condition,message):
  if not condition:raise RuntimeError(message)
 def tuple_(n,band=None,amplitude=None):return {'sample':n,'band':band or f'b{n}','amplitude':n*10 if amplitude is None else amplitude,'valid':True}
@@ -152,6 +169,61 @@ def walkthrough(name,binary):
     q=s.query(where=[{'column':'amplitude','op':'>=','value':40}],limit=2)
     require(q['matched']==3 and q['scanned']==3 and len(q['rows'])==2 and q['truncated'],'query fact meanings conflated')
     observations={'query':q,'stats':s.stats()}
+   elif name=='query-cancel':
+    # Grow the relation so a full scan has real work a 1ms budget can interrupt.
+    # Respect the 1000-key per-transaction write-set cap by seeding in batches.
+    pending=0;bulk=s.begin()
+    for n in range(100,1400):
+     if pending>=950:s.commit(bulk);bulk=s.begin();pending=0
+     s.put(bulk,tuple_(n));pending+=1
+    s.commit(bulk)
+    full=s.query(force_scan=True)
+    full_count=full['matched']
+    require('execution' not in full,'legacy no-budget response shape changed')
+    # 1. Time budget: a 1ms full-scan aggregate either completes whole or fails
+    #    with 408. It must never return a half count/sum. Retry until observed.
+    timed_out=None
+    for _ in range(25):
+     status,body=s.raw_post('/query',{'relation':'spectra','force_scan':True,'timeout_ms':1,
+      'aggregate':{'function':'count','column':'*'}})
+     if status==408:
+      require(body['error']['code']=='timeout' and 'rows' not in body,'408 returned partial aggregate')
+      timed_out=body;break
+     require(status==200 and len(body['rows'])==1 and body['execution']['status']=='complete',
+      'budgeted query returned neither a whole result nor a clean 408')
+    require(timed_out is not None,'never observed a 408 on this fast machine')
+    # 2. The same budget works through the SQL entry with identical semantics.
+    sql_status,sql_body=s.raw_post('/sql',{'sql':'SELECT count(*) FROM spectra;','timeout_ms':1})
+    require(sql_status in (200,408),'SQL budget status unexpected: %d'%sql_status)
+    if sql_status==200:require(sql_body['rows']==[{'count':full_count}],'SQL count diverged')
+    # 3. Client disconnect: the abandoned scan must stop and release its read pin.
+    before_pins=s.stats()['active_read_pins']
+    s.canceled_post('/query',{'relation':'spectra','force_scan':True,'timeout_ms':5000})
+    deadline=time.monotonic()+3
+    while time.monotonic()<deadline and s.stats()['active_read_pins']>before_pins:time.sleep(.01)
+    require(s.stats()['active_read_pins']==before_pins,'canceled scan retained a read pin')
+    # 4. A pinned transaction keeps its history across churn, then vacuum advances.
+    pinned=s.begin(True)
+    pinned_snap=next(t['snapshot'] for t in s.stats()['active'] if t['id']==pinned)
+    writer=s.begin()
+    for n in range(1400,1420):s.put(writer,tuple_(n))
+    s.commit(writer);head=s.stats()['sequence']
+    vac=s.call('POST','/vacuum',{'horizon':head})
+    require(vac['horizon']<=pinned_snap,'vacuum crossed an active reader snapshot')
+    require(s.query(transaction=pinned)['matched']==full_count,'pinned reader lost history protection')
+    s.call('POST',f'/transactions/{pinned}/rollback')
+    s.call('POST','/vacuum',{'horizon':head})
+    follow=s.query(force_scan=True)
+    require(follow['matched']==full_count+20,'follow-up read missed concurrent commits')
+    budgeted=s.query(timeout_ms=5000,force_scan=True)
+    require(budgeted['execution']['status']=='complete' and budgeted['execution']['timeout_ms']==5000,
+     'successful budgeted request lacks complete execution feedback')
+    require(budgeted['matched']==follow['matched'],'budget changed result semantics')
+    stats=s.stats()
+    require(stats['timed_out_queries_since_open']>=1,'timeout not accounted in stats')
+    observations={'timeout':timed_out,'follow_up_matched':follow['matched'],
+     'execution':budgeted['execution'],'stats_facts':{'timed_out':stats['timed_out_queries_since_open'],
+     'canceled':stats['canceled_queries_since_open'],'read_pins':stats['active_read_pins']}}
    else:raise ValueError(name)
    return {'workflow':name,'status':'observed','observations':observations}
   finally:

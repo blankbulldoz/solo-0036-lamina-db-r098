@@ -68,6 +68,14 @@ func respondError(w http.ResponseWriter, err error) {
 			status = 410
 		case "capacity":
 			status = 429
+		case "timeout":
+			// Explicit time budget exhausted before the query completed. The
+			// body is an error only: no partial rows, count or sum.
+			status = http.StatusRequestTimeout
+		case "canceled":
+			// Client closed the connection or otherwise canceled its own read.
+			// Nginx-style 499 keeps it distinct from server-side failures.
+			status = 499
 		case "unavailable":
 			status = 503
 		}

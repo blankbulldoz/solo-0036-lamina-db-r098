@@ -94,3 +94,5 @@ func (v Value) Key() string {
 	return v.Kind + ":" + string(b)
 }
 func Integer(n int64) Value { return Value{Kind: "int", Int: n} }
+func Text(s string) Value   { return Value{Kind: "text", Text: s} }
+func Boolean(b bool) Value  { return Value{Kind: "bool", Bool: b} }

@@ -6,9 +6,17 @@ import (
 	"lamina/internal/datum"
 )
 
+// MaxTimeoutMS caps an explicit query budget. It stays below the server's
+// 30s write timeout so a budgeted query always gets to report its own typed
+// timeout instead of being cut by the idle connection deadline.
+const MaxTimeoutMS int64 = 30000
+
 func Bind(r catalog.Relation, q Request) error {
 	if q.Limit < 0 || q.Limit > 10000 {
 		return fmt.Errorf("limit must be 0..10000")
+	}
+	if q.TimeoutMS < 0 || q.TimeoutMS > MaxTimeoutMS {
+		return fmt.Errorf("timeout_ms must be 0..%d", MaxTimeoutMS)
 	}
 	if len(q.Where) > 32 || len(q.Order) > 8 {
 		return fmt.Errorf("query expression limit exceeded")

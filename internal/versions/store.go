@@ -65,6 +65,34 @@ func (s *Store) Scan(table string, at uint64) map[string]datum.Row {
 	}
 	return out
 }
+
+// ScanCancellable is the cooperative variant of Scan. Each visit observes the
+// supplied gate so a canceled or budget-exhausted reader stops walking version
+// chains instead of materializing rows nobody will receive. It returns the
+// rows gathered so far together with the gate's terminal error; callers must
+// not treat the partial map as a query result.
+func (s *Store) ScanCancellable(table string, at uint64, gate func() error) (map[string]datum.Row, error) {
+	out := map[string]datum.Row{}
+	rows := s.Tables[table]
+	processed := 0
+	for k, c := range rows {
+		if v, ok := Visible(c, at); ok {
+			out[k] = datum.Clone(v.Row)
+		}
+		processed++
+		if processed%queryCheckpointEvery == 0 {
+			if err := gate(); err != nil {
+				return out, err
+			}
+		}
+	}
+	return out, nil
+}
+
+// queryCheckpointEvery mirrors query.CheckpointEvery without importing the
+// query package (versions is a lower layer).
+const queryCheckpointEvery = 64
+
 func (s *Store) Clone() *Store {
 	out := New()
 	for name, rows := range s.Tables {

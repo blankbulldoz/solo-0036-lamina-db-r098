@@ -22,10 +22,13 @@ type DB struct {
 	sequence     uint64
 	horizon      uint64
 	transactions map[string]*Transaction
+	readPins     *pinRegistry
 	closed       bool
 	commits      uint64
 	conflicts    uint64
 	queries      uint64
+	canceled     uint64
+	timedOut     uint64
 }
 
 func Open(dir string) (*DB, error) {
@@ -47,7 +50,7 @@ func Open(dir string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &DB{dir: absolute, catalog: catalog.New(), store: versions.New(), wal: w, transactions: map[string]*Transaction{}}
+	d := &DB{dir: absolute, catalog: catalog.New(), store: versions.New(), wal: w, transactions: map[string]*Transaction{}, readPins: newPinRegistry()}
 	if !missing {
 		d.catalog = image.Catalog
 		d.store = image.Store
@@ -94,6 +97,11 @@ func (d *DB) Close() error {
 	}
 	d.closed = true
 	d.transactions = map[string]*Transaction{}
+	// No executor can be inside Query while Close holds d.mu; clear any
+	// residual pins so a closed database never advertises live readers.
+	for _, pin := range d.readPins.pins {
+		d.readPins.release(pin)
+	}
 	return d.wal.Close()
 }
 func (d *DB) publish(r journal.Record) error {

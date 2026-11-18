@@ -25,6 +25,10 @@ type Request struct {
 	Transaction string      `json:"transaction,omitempty"`
 	Aggregate   *Aggregate  `json:"aggregate,omitempty"`
 	ForceScan   bool        `json:"force_scan,omitempty"`
+	// TimeoutMS is the cooperative execution budget in milliseconds. Zero
+	// means no budget and preserves the legacy unbounded request semantics.
+	// The HTTP transport additionally honors client disconnects regardless.
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
 }
 type Plan struct {
 	Access     string `json:"access"`
@@ -39,4 +43,8 @@ type Result struct {
 	Scanned   int         `json:"scanned"`
 	Matched   int         `json:"matched"`
 	Truncated bool        `json:"truncated"`
+	// Execution is present only for requests that set timeout_ms. A result is
+	// only ever returned with Status "complete"; every stopped request returns
+	// an error instead and never partial rows, count or sum.
+	Execution *Execution `json:"execution,omitempty"`
 }

@@ -6,6 +6,7 @@ type Stats struct {
 	Sequence       uint64         `json:"sequence"`
 	Horizon        uint64         `json:"horizon"`
 	Active         []Transaction  `json:"active"`
+	ReadPins       int            `json:"active_read_pins"`
 	Keys           int            `json:"keys"`
 	Versions       int            `json:"versions"`
 	IndexEntries   map[string]int `json:"index_entries"`
@@ -15,6 +16,8 @@ type Stats struct {
 	Commits        uint64         `json:"commits_since_open"`
 	Conflicts      uint64         `json:"conflicts_since_open"`
 	Queries        uint64         `json:"queries_since_open"`
+	Canceled       uint64         `json:"canceled_queries_since_open"`
+	TimedOut       uint64         `json:"timed_out_queries_since_open"`
 }
 
 func (d *DB) Stats() (Stats, error) {
@@ -24,7 +27,7 @@ func (d *DB) Stats() (Stats, error) {
 		return Stats{}, err
 	}
 	keys, versions := d.store.Count()
-	s := Stats{Sequence: d.sequence, Horizon: d.horizon, Keys: keys, Versions: versions, Active: []Transaction{}, IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries}
+	s := Stats{Sequence: d.sequence, Horizon: d.horizon, ReadPins: d.readPins.active(), Keys: keys, Versions: versions, Active: []Transaction{}, IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries, Canceled: d.canceled, TimedOut: d.timedOut}
 	for _, tx := range d.transactions {
 		copy := *tx
 		copy.writes = nil
